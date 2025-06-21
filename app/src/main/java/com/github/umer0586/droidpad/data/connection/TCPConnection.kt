@@ -19,10 +19,13 @@
 
 package com.github.umer0586.droidpad.data.connection
 
+import android.util.Log
 import com.github.umer0586.droidpad.data.connectionconfig.TCPConfig
 import com.github.umer0586.droidpad.data.database.entities.ConnectionType
 import io.ktor.network.selector.SelectorManager
 import io.ktor.network.sockets.Socket
+import io.ktor.network.sockets.SocketOptions
+import io.ktor.network.sockets.TypeOfService
 import io.ktor.network.sockets.aSocket
 import io.ktor.network.sockets.openWriteChannel
 import io.ktor.utils.io.ByteWriteChannel
@@ -30,6 +33,8 @@ import io.ktor.utils.io.writeStringUtf8
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
@@ -40,8 +45,13 @@ class TCPConnection(
 ) : Connection() {
 
     private var selectorManager: SelectorManager? = null
+    private val TAG: String = "TCPConnection"
     private var socket : Socket? = null
     private var writeChannel: ByteWriteChannel ? = null
+
+    // sendData Coroutine write lock
+    // Fixes a NullPointerExcept that occurs when using multiple joysticks at once
+    private val writeMutex = Mutex()
 
     override val connectionType: ConnectionType
         get() = ConnectionType.TCP
@@ -59,6 +69,12 @@ class TCPConnection(
                 withTimeout(tcpConfig.timeoutSecs*1000L) {
                     socket = aSocket(selectorManager)
                         .tcp()
+                        .configure {
+                            if (this is SocketOptions.TCPClientSocketOptions) {
+                                this.noDelay = false;
+                                this.typeOfService = TypeOfService.IPTOS_LOWDELAY
+                            }
+                        }
                         .connect(tcpConfig.host, tcpConfig.port)
                 }
 
@@ -79,12 +95,17 @@ class TCPConnection(
     }
 
     override suspend fun sendData(data: String) = withContext<Unit>(ioDispatcher){
+
         try {
-            writeChannel?.writeStringUtf8(data)
+            writeMutex.withLock {
+                writeChannel?.writeStringUtf8(data)
+            }
         } catch (e: Exception) {
+            Log.e(TAG, "sendData: $e")
             e.printStackTrace()
             notifyConnectionState(ConnectionState.TCP_ERROR)
         }
+
     }
 
     override suspend fun tearDown() = withContext(ioDispatcher) {
